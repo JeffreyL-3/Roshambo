@@ -1,0 +1,47 @@
+{
+  "entities": {
+    "Match": {
+      "title": "Match",
+      "description": "A Rock Paper Scissors match.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "playing", "completed", "abandoned"],
+          "description": "Game state."
+        },
+        "players": {
+          "type": "array",
+          "description": "List of player IDs."
+        },
+        "choices": {
+          "type": "object",
+          "description": "Map of player IDs to their choice ('rock', 'paper', 'scissors', or null)."
+        },
+        "scores": {
+          "type": "object",
+          "description": "Map of player IDs to their score."
+        },
+        "isBotMatch": {
+          "type": "boolean",
+          "description": "Whether this is a match against a computer bot."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["status", "players", "scores", "choices", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "matches/{matchId}": {
+      "schema": "Match",
+      "description": "Active and past matches."
+    }
+  }
+}
