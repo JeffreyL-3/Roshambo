@@ -133,6 +133,21 @@ export default function App() {
     return () => unsub();
   }, [currentMatchId, user]);
 
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (currentMatchId && (gameState === 'waiting' || (gameState === 'playing' && !isBotMatch))) {
+        const matchRef = doc(db, 'matches', currentMatchId);
+        updateDoc(matchRef, { 
+          status: 'abandoned',
+          updatedAt: serverTimestamp()
+        }).catch(() => {});
+      }
+    };
+    
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [currentMatchId, gameState, isBotMatch]);
+
   const joinMatchmaking = async () => {
     if (!user) return;
     setGameState('waiting');
