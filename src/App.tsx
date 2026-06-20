@@ -4,7 +4,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Trophy, User, Loader2, LogOut, Bot } from 'lucide-react';
+import { Trophy, User, Loader2, LogOut, Bot, Users } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { auth, db } from './firebase';
 import { signInAnonymously, onAuthStateChanged, User as FirebaseUser } from 'firebase/auth';
@@ -12,6 +12,13 @@ import { collection, doc, query, where, limit, getDocs, setDoc, updateDoc, onSna
 
 type GameState = 'menu' | 'waiting' | 'playing' | 'result';
 type Choice = 'rock' | 'paper' | 'scissors' | null;
+
+function beats(c1: Choice | string, c2: Choice | string) {
+  if (c1 === 'rock' && c2 === 'scissors') return true;
+  if (c1 === 'paper' && c2 === 'rock') return true;
+  if (c1 === 'scissors' && c2 === 'paper') return true;
+  return false;
+}
 
 const CHOICES = [
   { id: 'rock', emoji: '🪨', label: 'Rock' },
@@ -24,13 +31,15 @@ export default function App() {
   const [gameState, setGameState] = useState<GameState>('menu');
   
   const [currentMatchId, setCurrentMatchId] = useState<string | null>(null);
-  const [opponent, setOpponent] = useState<string | null>(null);
   const [myChoice, setMyChoice] = useState<Choice>(null);
-  const [opponentChoice, setOpponentChoice] = useState<Choice>(null);
-  const [opponentMadeChoice, setOpponentMadeChoice] = useState(false);
-  const [scores, setScores] = useState({ me: 0, opponent: 0 });
-  const [roundWinner, setRoundWinner] = useState<string | 'tie' | null>(null);
+  const [myScore, setMyScore] = useState(0);
+  
+  const [opponents, setOpponents] = useState<{ id: string, choice: Choice, madeChoice: boolean, score: number, name: string }[]>([]);
+  const [roundMessage, setRoundMessage] = useState<string>('');
+  const [roundWinnerColor, setRoundWinnerColor] = useState<'me' | 'opponent' | 'tie'>('tie');
+  
   const [isBotMatch, setIsBotMatch] = useState(false);
+  const [isThreeWay, setIsThreeWay] = useState(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
@@ -58,53 +67,77 @@ export default function App() {
       const data = docSnap.data();
       
       if (data.status === 'abandoned') {
-        alert('Opponent disconnected or match abandoned.');
+        alert('Someone disconnected or match abandoned.');
         setCurrentMatchId(null);
         setGameState('menu');
         return;
       }
 
       setIsBotMatch(!!data.isBotMatch);
+      setIsThreeWay(!!data.isThreeWay);
 
       if (data.status === 'waiting') {
         setGameState('waiting');
       } else if (data.status === 'playing' || data.status === 'result') {
-        const oppId = data.isBotMatch ? `bot_${currentMatchId}` : data.players.find((p: string) => p !== user.uid);
-        if (oppId) setOpponent(oppId);
+        const oppIds = data.players.filter((p: string) => p !== user.uid);
+        if (data.isBotMatch) oppIds.push(`bot_${currentMatchId}`);
+        
+        const newOpponents = oppIds.map((id: string, index: number) => ({
+             id,
+             choice: data.choices ? data.choices[id] || null : null,
+             madeChoice: data.choices ? !!data.choices[id] : false,
+             score: data.scores ? data.scores[id] || 0 : 0,
+             name: data.isBotMatch ? 'Computer' : (data.isThreeWay ? `Opponent ${index + 1}` : 'Opponent')
+        }));
+        setOpponents(newOpponents);
         
         const myC = data.choices ? data.choices[user.uid] || null : null;
-        const oppC = (data.choices && oppId) ? data.choices[oppId] || null : null;
-        
         setMyChoice(myC);
-        setOpponentMadeChoice(!!oppC);
+        setMyScore(data.scores ? data.scores[user.uid] || 0 : 0);
         
-        if (myC && oppC) {
-           setOpponentChoice(oppC);
-           let winner = 'tie';
-           if (myC !== oppC) {
-              if (
-                (myC === "rock" && oppC === "scissors") ||
-                (myC === "paper" && oppC === "rock") ||
-                (myC === "scissors" && oppC === "paper")
-              ) {
-                winner = 'me';
-              } else {
-                winner = 'opponent';
-              }
+        const requiredPlayers = !!data.isThreeWay ? 3 : 2;
+        const allChosen = data.choices && Object.keys(data.choices).length === requiredPlayers;
+
+        if (allChosen && myC) {
+           let color: 'me' | 'opponent' | 'tie' = 'tie';
+           let msg = '';
+           
+           if (!data.isThreeWay) {
+               const oppC = newOpponents[0].choice;
+               if (myC !== oppC) {
+                  if (beats(myC, oppC)) color = 'me';
+                  else color = 'opponent';
+               }
+               msg = color === 'me' ? 'You Won!' : color === 'opponent' ? 'You Lost!' : 'Draw!';
+           } else {
+               const myBeats = newOpponents.filter(opp => opp.choice && beats(myC, opp.choice)).length;
+               color = myBeats > 0 ? 'me' : 'tie';
+               msg = `You earned +${myBeats} points!`;
            }
            
-           setRoundWinner(winner);
+           setRoundWinnerColor(color);
+           setRoundMessage(msg);
            setGameState('result');
            
-           // Only the host (player 1) processes the round end
            if (user.uid === data.players[0]) {
              setTimeout(() => {
                 const newScores = { ...data.scores };
-                if (winner === 'me') newScores[user.uid] = (newScores[user.uid] || 0) + 1;
-                else if (winner === 'opponent' && oppId) newScores[oppId] = (newScores[oppId] || 0) + 1;
                 
+                const allIds = [...data.players];
+                if (data.isBotMatch) allIds.push(`bot_${currentMatchId}`);
+                
+                allIds.forEach(p1 => {
+                   let points = 0;
+                   allIds.forEach(p2 => {
+                     if (p1 !== p2 && data.choices[p1] && data.choices[p2] && beats(data.choices[p1], data.choices[p2])) {
+                        points++;
+                     }
+                   });
+                   newScores[p1] = (newScores[p1] || 0) + points;
+                });
+
                 updateDoc(matchRef, {
-                  choices: {}, // reset round
+                  choices: {},
                   scores: newScores,
                   updatedAt: serverTimestamp()
                 }).catch(console.error);
@@ -112,15 +145,6 @@ export default function App() {
            }
         } else {
           setGameState('playing');
-          setOpponentChoice(null);
-          setRoundWinner(null);
-        }
-        
-        if (oppId) {
-          setScores({
-            me: data.scores ? data.scores[user.uid] || 0 : 0,
-            opponent: data.scores ? data.scores[oppId] || 0 : 0
-          });
         }
       }
     }, (error) => {
@@ -148,12 +172,18 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [currentMatchId, gameState, isBotMatch]);
 
-  const joinMatchmaking = async () => {
+  const joinMatchmaking = async (threeWay: boolean = false) => {
     if (!user) return;
     setGameState('waiting');
     try {
       const matchesRef = collection(db, 'matches');
-      const q = query(matchesRef, where('status', '==', 'waiting'), where('isBotMatch', '==', false), limit(1));
+      const q = query(
+        matchesRef, 
+        where('status', '==', 'waiting'), 
+        where('isBotMatch', '==', false), 
+        where('isThreeWay', '==', threeWay), 
+        limit(1)
+      );
       const snapshot = await getDocs(q);
       
       let matchIdToJoin = null;
@@ -167,10 +197,11 @@ export default function App() {
       }
       
       if (matchIdToJoin && matchedDoc) {
+        const newPlayers = [...matchedDoc.data().players, user.uid];
         const matchRef = doc(db, 'matches', matchIdToJoin);
         await updateDoc(matchRef, {
-          players: [...matchedDoc.data().players, user.uid],
-          status: 'playing',
+          players: newPlayers,
+          status: newPlayers.length === (threeWay ? 3 : 2) ? 'playing' : 'waiting',
           updatedAt: serverTimestamp()
         });
         setCurrentMatchId(matchIdToJoin);
@@ -182,6 +213,7 @@ export default function App() {
           choices: {},
           scores: { [user.uid]: 0 },
           isBotMatch: false,
+          isThreeWay: threeWay,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp()
         });
@@ -205,6 +237,7 @@ export default function App() {
         choices: {},
         scores: { [user.uid]: 0, [botId]: 0 },
         isBotMatch: true,
+        isThreeWay: false,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp()
       });
@@ -247,12 +280,32 @@ export default function App() {
     setCurrentMatchId(null);
     setGameState('menu');
     setMyChoice(null);
-    setOpponentChoice(null);
-    setRoundWinner(null);
+  };
+
+  const renderPlayerSide = (title: string, choiceKey: 'me' | 'opp', opp?: {choice: Choice, madeChoice: boolean, name: string}) => {
+    const madeChoice = choiceKey === 'me' ? !!myChoice : !!opp?.madeChoice;
+    const choice = choiceKey === 'me' ? myChoice : (gameState === 'result' ? opp?.choice : null);
+    
+    let borderColor = 'border-zinc-800';
+    if (choiceKey === 'me') {
+       if (myChoice) borderColor = 'border-indigo-500 shadow-[0_0_30px_rgba(99,102,241,0.2)]';
+    } else {
+       if (gameState === 'result' && choice) borderColor = 'border-rose-500 shadow-[0_0_30px_rgba(244,63,94,0.2)]';
+       else if (madeChoice) borderColor = 'border-emerald-500';
+    }
+
+    return (
+      <div className="flex flex-col items-center flex-1 min-w-[140px]">
+        <div className={`w-32 h-32 rounded-3xl flex items-center justify-center text-6xl bg-zinc-900 border-2 transition-all ${borderColor}`}>
+          {choice ? CHOICES.find(c => c.id === choice)?.emoji : madeChoice ? '✓' : '?'}
+        </div>
+        <div className="mt-4 text-zinc-400 font-medium tracking-wide uppercase text-center truncate w-32">{title}</div>
+      </div>
+    );
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-50 flex flex-col items-center justify-center p-4 font-sans">
+    <div className="min-h-screen bg-zinc-950 text-zinc-50 flex flex-col items-center justify-center p-4 font-sans overflow-hidden">
       <AnimatePresence mode="wait">
         {gameState === 'menu' && (
           <motion.div
@@ -272,11 +325,18 @@ export default function App() {
             
             <div className="w-full space-y-4">
               <button
-                onClick={joinMatchmaking}
+                onClick={() => joinMatchmaking(false)}
                 className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-semibold py-4 px-8 rounded-2xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2"
               >
                 <User className="w-5 h-5" />
-                Find Opponent
+                Find Opponent (1v1)
+              </button>
+              <button
+                onClick={() => joinMatchmaking(true)}
+                className="w-full bg-violet-600 hover:bg-violet-500 text-white font-semibold py-4 px-8 rounded-2xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2"
+              >
+                <Users className="w-5 h-5" />
+                Online 3-Way
               </button>
               <button
                 onClick={playComputer}
@@ -298,7 +358,7 @@ export default function App() {
             className="flex flex-col items-center"
           >
             <Loader2 className="w-12 h-12 text-indigo-500 animate-spin mb-6" />
-            <h2 className="text-2xl font-semibold mb-2">Searching for opponent...</h2>
+            <h2 className="text-2xl font-semibold mb-2">Searching for opponents...</h2>
             <p className="text-zinc-400 mb-8">Please wait while we find a match</p>
             
             <button
@@ -316,56 +376,53 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="w-full max-w-2xl flex flex-col h-[80vh]"
+            className="w-full max-w-4xl flex flex-col h-[80vh]"
           >
             {/* Header / Scoreboard */}
-            <div className="flex justify-between items-center bg-zinc-900/50 p-4 rounded-2xl border border-zinc-800 mb-8">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400">
+            <div className="flex justify-between items-center bg-zinc-900/50 p-4 rounded-2xl border border-zinc-800 mb-8 overflow-x-auto">
+              <div className="flex items-center gap-3 pr-4 border-r border-zinc-800">
+                <div className="w-10 h-10 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-400 flex-shrink-0">
                   <User className="w-5 h-5" />
                 </div>
-                <div>
+                <div className="min-w-16">
                   <div className="text-sm text-zinc-400">You</div>
-                  <div className="font-bold text-xl">{scores.me}</div>
+                  <div className="font-bold text-xl">{myScore}</div>
                 </div>
               </div>
               
-              <div className="flex flex-col items-center">
+              <div className="flex flex-col items-center px-4 flex-shrink-0 hidden sm:flex">
                 <Trophy className="w-6 h-6 text-yellow-500 mb-1" />
                 <span className="text-xs font-medium text-zinc-500 uppercase tracking-widest">Score</span>
               </div>
 
-              <div className="flex items-center gap-3 text-right">
-                <div>
-                  <div className="text-sm text-zinc-400">{isBotMatch ? 'Computer' : 'Opponent'}</div>
-                  <div className="font-bold text-xl">{scores.opponent}</div>
-                </div>
-                <div className="w-10 h-10 rounded-full bg-rose-500/20 flex items-center justify-center text-rose-400">
-                  {isBotMatch ? <Bot className="w-5 h-5" /> : <User className="w-5 h-5" />}
-                </div>
+              <div className="flex items-center gap-6 pl-4 border-l border-zinc-800 overflow-x-auto scrollbar-default py-1 ml-auto">
+                {opponents.map(opp => (
+                  <div key={opp.id} className="flex items-center gap-3 text-right">
+                    <div className="min-w-16">
+                      <div className="text-sm text-zinc-400 truncate w-20" title={opp.name}>{opp.name}</div>
+                      <div className="font-bold text-xl">{opp.score}</div>
+                    </div>
+                    <div className="w-10 h-10 rounded-full bg-rose-500/20 flex items-center justify-center text-rose-400 flex-shrink-0">
+                      {opp.name === 'Computer' ? <Bot className="w-5 h-5" /> : <User className="w-5 h-5" />}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
 
             {/* Battle Area */}
             <div className="flex-1 flex flex-col justify-center items-center relative">
-              <div className="flex justify-between w-full items-center px-8">
+              <div className="flex flex-col sm:flex-row flex-wrap justify-center gap-4 sm:gap-8 w-full items-center px-4">
                 {/* My Side */}
-                <div className="flex flex-col items-center">
-                  <div className={`w-32 h-32 rounded-3xl flex items-center justify-center text-6xl bg-zinc-900 border-2 transition-all ${myChoice ? 'border-indigo-500 shadow-[0_0_30px_rgba(99,102,241,0.2)]' : 'border-zinc-800'}`}>
-                    {myChoice ? CHOICES.find(c => c.id === myChoice)?.emoji : '?'}
-                  </div>
-                  <div className="mt-4 text-zinc-400 font-medium tracking-wide">YOU</div>
-                </div>
+                {renderPlayerSide('YOU', 'me')}
 
-                <div className="text-3xl font-bold text-zinc-700">VS</div>
-
-                {/* Opponent Side */}
-                <div className="flex flex-col items-center">
-                  <div className={`w-32 h-32 rounded-3xl flex items-center justify-center text-6xl bg-zinc-900 border-2 transition-all ${opponentChoice ? 'border-rose-500 shadow-[0_0_30px_rgba(244,63,94,0.2)]' : opponentMadeChoice ? 'border-emerald-500' : 'border-zinc-800'}`}>
-                    {opponentChoice ? CHOICES.find(c => c.id === opponentChoice)?.emoji : opponentMadeChoice ? '✓' : '?'}
-                  </div>
-                  <div className="mt-4 text-zinc-400 font-medium tracking-wide">{isBotMatch ? 'COMPUTER' : 'OPPONENT'}</div>
-                </div>
+                {/* Opponent Sides */}
+                {opponents.map(opp => (
+                   <div key={opp.id} className="flex flex-col sm:flex-row gap-4 sm:gap-8 items-center">
+                     <div className="text-3xl font-bold text-zinc-700">VS</div>
+                     {renderPlayerSide(opp.name, 'opp', opp)}
+                   </div>
+                ))}
               </div>
 
               {/* Result Overlay */}
@@ -375,17 +432,15 @@ export default function App() {
                     initial={{ opacity: 0, scale: 0.8, y: 20 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.8, y: -20 }}
-                    className="absolute inset-0 flex items-center justify-center pointer-events-none"
+                    className="absolute inset-x-0 top-1/2 -translate-y-1/2 flex items-center justify-center pointer-events-none z-10"
                   >
-                    <div className="bg-zinc-950/90 backdrop-blur-sm px-8 py-4 rounded-full border border-zinc-800 shadow-2xl">
-                      <h2 className={`text-3xl font-bold ${
-                        roundWinner === 'me' ? 'text-emerald-400' : 
-                        roundWinner === 'opponent' ? 'text-rose-400' : 
+                    <div className="bg-zinc-950/95 backdrop-blur-md px-10 py-6 rounded-full border border-zinc-800 shadow-2xl">
+                      <h2 className={`text-4xl font-bold ${
+                        roundWinnerColor === 'me' ? 'text-emerald-400' : 
+                        roundWinnerColor === 'opponent' ? 'text-rose-400' : 
                         'text-zinc-400'
                       }`}>
-                        {roundWinner === 'me' ? 'You Won!' : 
-                         roundWinner === 'opponent' ? 'You Lost!' : 
-                         'Draw!'}
+                        {roundMessage}
                       </h2>
                     </div>
                   </motion.div>
@@ -430,4 +485,3 @@ export default function App() {
     </div>
   );
 }
-

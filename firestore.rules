@@ -13,7 +13,7 @@ service cloud.firestore {
       return data.keys().hasAll(['status', 'players', 'isBotMatch', 'scores', 'choices', 'createdAt', 'updatedAt'])
              && data.status in ['waiting', 'playing', 'completed', 'abandoned', 'result']
              && data.players is list
-             && data.players.size() >= 1 && data.players.size() <= 2
+             && data.players.size() >= 1 && data.players.size() <= 3
              && data.isBotMatch is bool
              && data.createdAt is timestamp
              && data.updatedAt is timestamp;
